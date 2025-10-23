@@ -1,0 +1,21 @@
+# Build artifacts
+/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.out
+
+# Local tool outputs
+/.archivara/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
