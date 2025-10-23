@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/cuckoo_sip.dir/cli/main.cc.o -o cuckoo_sip  libbench.a libgraph.a libsiphash.a libverify.a liblean_solver.a libmean_solver.a libverify.a libgraph.a libsiphash.a 
