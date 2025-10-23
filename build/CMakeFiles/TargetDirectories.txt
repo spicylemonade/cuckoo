@@ -1,0 +1,3 @@
+/workspace/repo/build/CMakeFiles/cuckoo_sip.dir
+/workspace/repo/build/CMakeFiles/edit_cache.dir
+/workspace/repo/build/CMakeFiles/rebuild_cache.dir
