@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsiphash.a CMakeFiles/siphash.dir/src/siphash.cc.o
+/usr/bin/ranlib libsiphash.a

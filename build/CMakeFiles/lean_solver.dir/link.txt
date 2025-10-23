@@ -1,0 +1,2 @@
+/usr/bin/ar qc liblean_solver.a CMakeFiles/lean_solver.dir/cuckoo/lean_solver.cc.o
+/usr/bin/ranlib liblean_solver.a

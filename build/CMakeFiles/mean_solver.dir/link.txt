@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmean_solver.a CMakeFiles/mean_solver.dir/cuckoo/mean_solver.cc.o
+/usr/bin/ranlib libmean_solver.a

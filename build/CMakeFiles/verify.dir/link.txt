@@ -1,0 +1,2 @@
+/usr/bin/ar qc libverify.a CMakeFiles/verify.dir/verify/verify.cc.o
+/usr/bin/ranlib libverify.a
