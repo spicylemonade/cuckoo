@@ -24,3 +24,7 @@ add_executable(cuckoo_sip
 target_include_directories(cuckoo_sip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} src cuckoo verify bench)
 
 target_compile_options(cuckoo_sip PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter)
+
+# Threads for std::thread
+find_package(Threads REQUIRED)
+target_link_libraries(cuckoo_sip PRIVATE Threads::Threads)
