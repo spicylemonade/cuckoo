@@ -5,11 +5,26 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <deque>
+#include <thread>
+#include <mutex>
 
 namespace cuckoo_sip {
 
+// Portable atomic fetch_or on uint64_t using compiler builtins when available; fallback to mutex.
+static inline uint64_t atomic_fetch_or_u64(uint64_t* addr, uint64_t mask) {
+#if defined(__clang__) || defined(__GNUC__)
+    return __atomic_fetch_or(addr, mask, __ATOMIC_RELAXED);
+#else
+    static std::mutex m;
+    std::lock_guard<std::mutex> lock(m);
+    uint64_t old = *addr;
+    *addr = old | mask;
+    return old;
+#endif
+}
+
 LeanSolver::LeanSolver(const Params& params, uint32_t threads, double memcap_bytes_per_edge)
-    : p_(params), threads_(threads), memcap_bpe_(memcap_bytes_per_edge) {
+    : p_(params), threads_(threads ? threads : 1), memcap_bpe_(memcap_bytes_per_edge) {
     // Enforce memory cap (persistent bitsets only)
     if (mem_bytes_per_edge() > memcap_bpe_) {
         throw std::runtime_error("Lean solver theoretical mem exceeds cap: " +
@@ -59,27 +74,66 @@ uint64_t LeanSolver::trim_round_both(const std::vector<uint64_t>& edge_alive,
     std::fill(seen1.begin(), seen1.end(), 0ULL);
     std::fill(nonleaf1.begin(), nonleaf1.end(), 0ULL);
 
-    // Pass 1: build seen and nonleaf bitmaps for both sides
-    for (uint64_t i = 0; i < N; ++i) {
-        if (!bit_get(edge_alive, i)) continue;
-        const node_t u = endpoint(p_, i, 0);
-        const node_t v = endpoint(p_, i, 1);
-        if (!bit_get(seen0, u)) bit_set(seen0, u); else bit_set(nonleaf0, u);
-        if (!bit_get(seen1, v)) bit_set(seen1, v); else bit_set(nonleaf1, v);
+    const uint32_t T = threads_ ? threads_ : 1;
+    const uint64_t chunk = (N + T - 1) / T;
+
+    // Pass 1: build seen and nonleaf bitmaps for both sides using atomic fetch_or on bitset words
+    std::vector<std::thread> ths;
+    ths.reserve(T);
+    for (uint32_t t = 0; t < T; ++t) {
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(N, start + chunk);
+        if (start >= end) break;
+        ths.emplace_back([&, start, end]() {
+            for (uint64_t i = start; i < end; ++i) {
+                if (!bit_get(edge_alive, i)) continue;
+                const node_t u = endpoint(p_, i, 0);
+                const node_t v = endpoint(p_, i, 1);
+                size_t wu = static_cast<size_t>(u >> 6);
+                uint64_t mu = 1ULL << (u & 63ULL);
+                uint64_t oldu = atomic_fetch_or_u64(&seen0[wu], mu);
+                if (oldu & mu) { atomic_fetch_or_u64(&nonleaf0[wu], mu); }
+
+                size_t wv = static_cast<size_t>(v >> 6);
+                uint64_t mv = 1ULL << (v & 63ULL);
+                uint64_t oldv = atomic_fetch_or_u64(&seen1[wv], mv);
+                if (oldv & mv) { atomic_fetch_or_u64(&nonleaf1[wv], mv); }
+            }
+        });
     }
+    for (auto& th : ths) th.join();
 
     // Pass 2: keep edges with both endpoints in nonleaf
     std::fill(new_edge_alive.begin(), new_edge_alive.end(), 0ULL);
-    uint64_t kept = 0;
-    for (uint64_t i = 0; i < N; ++i) {
-        if (!bit_get(edge_alive, i)) continue;
-        const node_t u = endpoint(p_, i, 0);
-        const node_t v = endpoint(p_, i, 1);
-        if (bit_get(nonleaf0, u) && bit_get(nonleaf1, v)) {
-            bit_set(new_edge_alive, i);
-            ++kept;
-        }
+    std::vector<uint64_t> kept_local(T, 0ULL);
+    ths.clear(); ths.reserve(T);
+    for (uint32_t t = 0; t < T; ++t) {
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(N, start + chunk);
+        if (start >= end) break;
+        ths.emplace_back([&, start, end, t]() {
+            uint64_t kept = 0;
+            for (uint64_t i = start; i < end; ++i) {
+                if (!bit_get(edge_alive, i)) continue;
+                const node_t u = endpoint(p_, i, 0);
+                const node_t v = endpoint(p_, i, 1);
+                size_t wu = static_cast<size_t>(u >> 6);
+                uint64_t mu = 1ULL << (u & 63ULL);
+                size_t wv = static_cast<size_t>(v >> 6);
+                uint64_t mv = 1ULL << (v & 63ULL);
+                if ((seen0[wu] & mu) && (nonleaf0[wu] & mu) && (seen1[wv] & mv) && (nonleaf1[wv] & mv)) {
+                    size_t we = static_cast<size_t>(i >> 6);
+                    uint64_t me = 1ULL << (i & 63ULL);
+                    atomic_fetch_or_u64(&new_edge_alive[we], me);
+                    ++kept;
+                }
+            }
+            kept_local[t] = kept;
+        });
     }
+    for (auto& th : ths) th.join();
+
+    uint64_t kept = 0; for (auto x : kept_local) kept += x;
     return kept;
 }
 
@@ -93,24 +147,57 @@ uint64_t LeanSolver::trim_round_side(const std::vector<uint64_t>& edge_alive,
     std::fill(seen_side.begin(), seen_side.end(), 0ULL);
     std::fill(nonleaf_side.begin(), nonleaf_side.end(), 0ULL);
 
-    // Build seen/nonleaf for the chosen side only
-    for (uint64_t i = 0; i < N; ++i) {
-        if (!bit_get(edge_alive, i)) continue;
-        const node_t x = endpoint(p_, i, side);
-        if (!bit_get(seen_side, x)) bit_set(seen_side, x); else bit_set(nonleaf_side, x);
+    const uint32_t T = threads_ ? threads_ : 1;
+    const uint64_t chunk = (N + T - 1) / T;
+
+    // Build seen/nonleaf for the chosen side using atomic fetch_or on words
+    std::vector<std::thread> ths;
+    ths.reserve(T);
+    for (uint32_t t = 0; t < T; ++t) {
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(N, start + chunk);
+        if (start >= end) break;
+        ths.emplace_back([&, start, end]() {
+            for (uint64_t i = start; i < end; ++i) {
+                if (!bit_get(edge_alive, i)) continue;
+                const node_t x = endpoint(p_, i, side);
+                size_t wx = static_cast<size_t>(x >> 6);
+                uint64_t mx = 1ULL << (x & 63ULL);
+                uint64_t oldx = atomic_fetch_or_u64(&seen_side[wx], mx);
+                if (oldx & mx) { atomic_fetch_or_u64(&nonleaf_side[wx], mx); }
+            }
+        });
     }
+    for (auto& th : ths) th.join();
 
     // Keep edges whose chosen endpoint is nonleaf
     std::fill(new_edge_alive.begin(), new_edge_alive.end(), 0ULL);
-    uint64_t kept = 0;
-    for (uint64_t i = 0; i < N; ++i) {
-        if (!bit_get(edge_alive, i)) continue;
-        const node_t x = endpoint(p_, i, side);
-        if (bit_get(nonleaf_side, x)) {
-            bit_set(new_edge_alive, i);
-            ++kept;
-        }
+    std::vector<uint64_t> kept_local(T, 0ULL);
+    ths.clear(); ths.reserve(T);
+    for (uint32_t t = 0; t < T; ++t) {
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(N, start + chunk);
+        if (start >= end) break;
+        ths.emplace_back([&, start, end, t]() {
+            uint64_t kept = 0;
+            for (uint64_t i = start; i < end; ++i) {
+                if (!bit_get(edge_alive, i)) continue;
+                const node_t x = endpoint(p_, i, side);
+                size_t wx = static_cast<size_t>(x >> 6);
+                uint64_t mx = 1ULL << (x & 63ULL);
+                if ((seen_side[wx] & mx) && (nonleaf_side[wx] & mx)) {
+                    size_t we = static_cast<size_t>(i >> 6);
+                    uint64_t me = 1ULL << (i & 63ULL);
+                    atomic_fetch_or_u64(&new_edge_alive[we], me);
+                    ++kept;
+                }
+            }
+            kept_local[t] = kept;
+        });
     }
+    for (auto& th : ths) th.join();
+
+    uint64_t kept = 0; for (auto x : kept_local) kept += x;
     return kept;
 }
 
