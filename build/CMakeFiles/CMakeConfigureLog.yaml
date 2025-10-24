@@ -274,3 +274,41 @@ events:
       
       
 ...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake-3.28/Modules/Internal/CheckSourceCompiles.cmake:101 (try_compile)"
+      - "/usr/share/cmake-3.28/Modules/CheckCXXSourceCompiles.cmake:52 (cmake_check_source_compiles)"
+      - "/usr/share/cmake-3.28/Modules/FindThreads.cmake:99 (CHECK_CXX_SOURCE_COMPILES)"
+      - "/usr/share/cmake-3.28/Modules/FindThreads.cmake:163 (_threads_check_libc)"
+      - "CMakeLists.txt:29 (find_package)"
+    checks:
+      - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
+    directories:
+      source: "/workspace/repo/build/CMakeFiles/CMakeScratch/TryCompile-Ra52jo"
+      binary: "/workspace/repo/build/CMakeFiles/CMakeScratch/TryCompile-Ra52jo"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "CMAKE_HAVE_LIBC_PTHREAD"
+      cached: true
+      stdout: |
+        Change Dir: '/workspace/repo/build/CMakeFiles/CMakeScratch/TryCompile-Ra52jo'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_ece7f/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_ece7f.dir/build.make CMakeFiles/cmTC_ece7f.dir/build
+        gmake[1]: Entering directory '/workspace/repo/build/CMakeFiles/CMakeScratch/TryCompile-Ra52jo'
+        Building CXX object CMakeFiles/cmTC_ece7f.dir/src.cxx.o
+        /usr/bin/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=gnu++17 -o CMakeFiles/cmTC_ece7f.dir/src.cxx.o -c /workspace/repo/build/CMakeFiles/CMakeScratch/TryCompile-Ra52jo/src.cxx
+        Linking CXX executable cmTC_ece7f
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ece7f.dir/link.txt --verbose=1
+        /usr/bin/c++ CMakeFiles/cmTC_ece7f.dir/src.cxx.o -o cmTC_ece7f 
+        gmake[1]: Leaving directory '/workspace/repo/build/CMakeFiles/CMakeScratch/TryCompile-Ra52jo'
+        
+      exitCode: 0
+...
