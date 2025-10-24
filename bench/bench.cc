@@ -14,6 +14,13 @@ namespace cuckoo_sip {
 
 static inline double ns_to_s(uint64_t ns) { return double(ns) * 1e-9; }
 
+static inline double median_of(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    size_t n = v.size();
+    return (n & 1) ? v[n/2] : 0.5 * (v[n/2 - 1] + v[n/2]);
+}
+
 BenchStats run_bench(const BenchConfig& cfg) {
     BenchStats stats;
     stats.attempts = cfg.attempts;
@@ -65,6 +72,7 @@ BenchStats run_bench(const BenchConfig& cfg) {
         uint64_t t1 = now_ns();
         double dt = ns_to_s(t1 - t0);
         stats.total_wall_s += dt;
+        stats.times_all_s.push_back(dt);
 
         if (success) {
             // Verify solution (supports arbitrary k)
@@ -92,19 +100,19 @@ BenchStats run_bench(const BenchConfig& cfg) {
                   << "\n";
     }
 
+    // Aggregate stats
     if (!stats.times_success_s.empty()) {
-        auto v = stats.times_success_s;
-        std::sort(v.begin(), v.end());
-        stats.median_time_success_s = (v.size() % 2 == 1) ? v[v.size()/2] : 0.5 * (v[v.size()/2 - 1] + v[v.size()/2]);
+        stats.median_time_success_s = median_of(stats.times_success_s);
         double sumlog = 0.0;
         for (double x : stats.times_success_s) sumlog += std::log(std::max(1e-12, x));
         stats.geomean_time_success_s = std::exp(sumlog / stats.times_success_s.size());
-        stats.gps = 1.0 / stats.median_time_success_s;
+        stats.gps = (stats.median_time_success_s > 0.0) ? (1.0 / stats.median_time_success_s) : 0.0;
     } else {
         stats.median_time_success_s = 0.0;
         stats.geomean_time_success_s = 0.0;
         stats.gps = 0.0;
     }
+    stats.median_time_all_s = median_of(stats.times_all_s);
 
     std::cout << "\nSummary:\n";
     std::cout << "  mode           : " << cfg.mode << "\n";
@@ -117,10 +125,43 @@ BenchStats run_bench(const BenchConfig& cfg) {
     std::cout << "  total_wall_s   : " << stats.total_wall_s << "\n";
     std::cout << "  median_t/succ  : " << stats.median_time_success_s << "\n";
     std::cout << "  geomean_t/succ : " << stats.geomean_time_success_s << "\n";
+    std::cout << "  median_t/all   : " << stats.median_time_all_s << "\n";
     std::cout << "  gps            : " << stats.gps << "\n";
     if (cfg.mode == "lean") { std::cout << "  mem bytes/edge : " << stats.mem_bpe << "\n"; }
 
     return stats;
+}
+
+bool run_baseline_compare(const BenchConfig& base_cfg, bool exit_if_ratio_exceeds) {
+    BenchConfig cfg24 = base_cfg;
+    cfg24.mode = "lean"; // force lean for baseline
+    cfg24.variant = SipHashVariant::SipHash24;
+    std::cout << "\n== Baseline (sip24, lean) ==\n";
+    auto stats24 = run_bench(cfg24);
+
+    BenchConfig cfg12 = base_cfg;
+    cfg12.mode = "lean"; // force lean for comparison
+    cfg12.variant = SipHashVariant::SipHash12;
+    std::cout << "\n== Test (sip12, lean) ==\n";
+    auto stats12 = run_bench(cfg12);
+
+    double m24 = stats24.median_time_all_s;
+    double m12 = stats12.median_time_all_s;
+    double ratio = (m24 > 0.0) ? (m12 / m24) : 0.0;
+
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "\nBaseline comparison (lean):\n";
+    std::cout << "  edge_bits   : " << base_cfg.edge_bits << "\n";
+    std::cout << "  threads     : " << base_cfg.threads << "\n";
+    std::cout << "  attempts    : " << base_cfg.attempts << "\n";
+    std::cout << "  median_all_s: sip12=" << m12 << ", sip24=" << m24 << "\n";
+    std::cout << "  ratio       : " << ratio << " (require <= 0.5)\n";
+
+    if (exit_if_ratio_exceeds && ratio > 0.5) {
+        std::cerr << "FAIL: sip12 median time ratio exceeds 0.5" << "\n";
+        return false;
+    }
+    return true;
 }
 
 } // namespace cuckoo_sip
