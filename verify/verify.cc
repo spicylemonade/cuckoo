@@ -1,6 +1,9 @@
 #include "verify.h"
 
 #include <unordered_set>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace cuckoo_sip {
 
@@ -9,72 +12,85 @@ bool verify_cycle_k(const Params& p, const std::vector<uint64_t>& edges, size_t 
         if (err) *err = "Edge count does not match cycle length";
         return false;
     }
-    // Check duplicates in edge indices
+
+    // 1) Range + uniqueness
     {
-        std::unordered_set<uint64_t> seen;
-        seen.reserve(edges.size() * 2);
+        std::unordered_set<uint64_t> uniq;
+        uniq.reserve(k * 2);
         for (auto e : edges) {
             if (e >= p.N) { if (err) *err = "Edge index out of range"; return false; }
-            if (!seen.insert(e).second) {
-                if (err) *err = "Duplicate edge index";
-                return false;
-            }
+            if (!uniq.insert(e).second) { if (err) *err = "Duplicate edge index"; return false; }
         }
     }
 
-    // Compute endpoints
+    // 2) Endpoints
     std::vector<node_t> us(k), vs(k);
     for (size_t i = 0; i < k; ++i) {
-        const uint64_t ei = edges[i];
-        us[i] = endpoint(p, ei, 0);
-        vs[i] = endpoint(p, ei, 1);
+        us[i] = endpoint(p, edges[i], 0);
+        vs[i] = endpoint(p, edges[i], 1);
     }
 
-    // Walk alternating sides greedily, ensuring all edges are used exactly once
-    std::vector<bool> used(k, false);
-    size_t used_cnt = 0;
-    node_t cur_u = us[0];
-    node_t cur_v = vs[0];
-    used[0] = true; used_cnt = 1;
-
-    for (size_t step = 1; step < k; ++step) {
-        bool found = false;
-        if (step & 1) {
-            // Match on v (stay on side-1 node)
-            for (size_t j = 0; j < k; ++j) {
-                if (!used[j] && vs[j] == cur_v) {
-                    used[j] = true; ++used_cnt;
-                    cur_u = us[j];
-                    found = true;
-                    break;
-                }
-            }
-        } else {
-            // Match on u (stay on side-0 node)
-            for (size_t j = 0; j < k; ++j) {
-                if (!used[j] && us[j] == cur_u) {
-                    used[j] = true; ++used_cnt;
-                    cur_v = vs[j];
-                    found = true;
-                    break;
-                }
-            }
+    // 3) Degree == 2 for every participating node on both sides
+    std::unordered_map<node_t, int> degU; degU.reserve(k * 2);
+    std::unordered_map<node_t, int> degV; degV.reserve(k * 2);
+    for (size_t i = 0; i < k; ++i) { degU[us[i]]++; degV[vs[i]]++; }
+    for (auto &kv : degU) {
+        if (kv.second != 2) {
+            if (err) *err = "side-0 node degree != 2";
+            return false;
         }
-        if (!found) {
-            if (err) *err = "Failed to find alternating match in cycle verification";
+    }
+    for (auto &kv : degV) {
+        if (kv.second != 2) {
+            if (err) *err = "side-1 node degree != 2";
             return false;
         }
     }
 
-    if (!(cur_u == us[0] && cur_v == vs[0])) {
-        if (err) *err = "Cycle does not return to starting node";
-        return false;
+    // 4) Traverse one simple cycle of length k that returns to start
+    std::unordered_map<node_t, std::pair<int,int>> idxU; idxU.reserve(degU.size() * 2 + 1);
+    std::unordered_map<node_t, std::pair<int,int>> idxV; idxV.reserve(degV.size() * 2 + 1);
+
+    auto push2U = [&](node_t n, int i) {
+        auto it = idxU.find(n);
+        if (it == idxU.end()) it = idxU.emplace(n, std::make_pair(-1, -1)).first;
+        auto &pr = it->second;
+        if (pr.first == -1) pr.first = i; else pr.second = i;
+    };
+    auto push2V = [&](node_t n, int i) {
+        auto it = idxV.find(n);
+        if (it == idxV.end()) it = idxV.emplace(n, std::make_pair(-1, -1)).first;
+        auto &pr = it->second;
+        if (pr.first == -1) pr.first = i; else pr.second = i;
+    };
+
+    for (int i = 0; i < (int)k; ++i) { push2U(us[i], i); push2V(vs[i], i); }
+
+    std::vector<char> used(k, 0);
+    int cur = 0; int side = 1; // we used edges[0] first; next we match on side-1 (v)
+    used[cur] = 1;
+
+    for (size_t step = 1; step < k; ++step) {
+        int nxt = -1;
+        if (side == 1) {
+            auto pr = idxV[vs[cur]];
+            nxt = (pr.first == cur) ? pr.second : pr.first;
+        } else {
+            auto pr = idxU[us[cur]];
+            nxt = (pr.first == cur) ? pr.second : pr.first;
+        }
+        if (nxt < 0 || used[nxt]) { if (err) *err = "bad alternating traversal"; return false; }
+        used[nxt] = 1; cur = nxt; side ^= 1;
     }
 
-    if (used_cnt != k) {
-        if (err) *err = "Not all edges used in cycle";
-        return false;
+    // Must close on the starting edge next
+    int nxtClose = -1;
+    if (side == 1) {
+        auto pr = idxV[vs[cur]]; nxtClose = (pr.first == cur) ? pr.second : pr.first;
+    } else {
+        auto pr = idxU[us[cur]]; nxtClose = (pr.first == cur) ? pr.second : pr.first;
     }
+    if (nxtClose != 0) { if (err) *err = "does not return to start"; return false; }
 
     return true;
 }
