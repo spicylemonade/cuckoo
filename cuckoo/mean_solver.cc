@@ -4,11 +4,23 @@
 #include <deque>
 #include <algorithm>
 #include <limits>
+#include <thread>
+#include <atomic>
 
 namespace cuckoo_sip {
 
+// Portable atomic fetch_or on uint64_t using compiler builtins when available; fallback to non-atomic (single-thread case only uses non-atomic path)
+static inline uint64_t atomic_fetch_or_u64(uint64_t* addr, uint64_t mask) {
+#if defined(__clang__) || defined(__GNUC__)
+    return __atomic_fetch_or(addr, mask, __ATOMIC_RELAXED);
+#else
+    // In multi-thread path we require atomic; but for non-GCC/Clang toolchains this fallback may not be strictly atomic.
+    uint64_t old = *addr; *addr = old | mask; return old;
+#endif
+}
+
 MeanSolver::MeanSolver(const Params& params, uint32_t threads, uint32_t bucket_bits)
-    : p_(params), threads_(threads), bucket_bits_(bucket_bits) {}
+    : p_(params), threads_(threads ? threads : 1), bucket_bits_(bucket_bits) {}
 
 void MeanSolver::init_edge_alive(std::vector<uint64_t>& edge_alive) const {
     const uint64_t N = p_.N;
@@ -31,43 +43,131 @@ uint64_t MeanSolver::trim_side_bucketed(const std::vector<uint64_t>& edge_alive,
     // Initialize new edge mask to zeros
     std::fill(new_edge_alive.begin(), new_edge_alive.end(), 0ULL);
 
-    // Allocate buckets of edge indices
+    const uint32_t T = threads_ ? threads_ : 1;
+
+    if (T <= 1) {
+        // Single-thread original path
+        std::vector<std::vector<uint64_t>> buckets;
+        buckets.resize(static_cast<size_t>(bucket_count));
+        const uint64_t approx_per_bucket = (N / (bucket_count ? bucket_count : 1ULL)) + 1ULL;
+        for (auto& b : buckets) b.reserve(static_cast<size_t>(approx_per_bucket));
+
+        // Partition alive edges into buckets by low bits of the chosen side's endpoint
+        for (uint64_t i = 0; i < N; ++i) {
+            if (!bit_get(edge_alive, i)) continue;
+            const node_t x = endpoint(p_, i, side);
+            const uint64_t b = static_cast<uint64_t>(x) & bucket_mask;
+            buckets[static_cast<size_t>(b)].push_back(i);
+        }
+
+        uint64_t kept = 0;
+        // For each bucket, count degrees per node and keep edges whose node degree >= 2 on this side.
+        for (size_t b = 0; b < buckets.size(); ++b) {
+            auto& vec = buckets[b];
+            if (vec.empty()) continue;
+            std::unordered_map<node_t, uint32_t> deg;
+            deg.reserve(vec.size() * 2 + 1);
+            for (uint64_t idx : vec) {
+                const node_t x = endpoint(p_, idx, side);
+                auto it = deg.find(x);
+                if (it == deg.end()) deg.emplace(x, 1U); else ++(it->second);
+            }
+            for (uint64_t idx : vec) {
+                const node_t x = endpoint(p_, idx, side);
+                if (deg[x] >= 2U) { size_t we = static_cast<size_t>(idx >> 6); uint64_t me = 1ULL << (idx & 63ULL); new_edge_alive[we] |= me; ++kept; }
+            }
+            std::vector<uint64_t>().swap(vec);
+            deg.clear();
+        }
+
+        return kept;
+    }
+
+    // Multi-threaded path
+    // Per-thread buckets to avoid contention
+    const uint64_t approx_per_bucket = (N / (bucket_count ? bucket_count : 1ULL)) / T + 1ULL;
+    std::vector<std::vector<std::vector<uint64_t>>> thread_buckets;
+    thread_buckets.resize(T);
+    for (uint32_t t = 0; t < T; ++t) {
+        thread_buckets[t].resize(static_cast<size_t>(bucket_count));
+        for (auto& v : thread_buckets[t]) v.reserve(static_cast<size_t>(approx_per_bucket));
+    }
+
+    const uint64_t chunk = (N + T - 1) / T;
+    std::vector<std::thread> ths;
+    ths.reserve(T);
+    for (uint32_t t = 0; t < T; ++t) {
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(N, start + chunk);
+        if (start >= end) break;
+        ths.emplace_back([&, t, start, end]() {
+            auto& buckets_local = thread_buckets[t];
+            for (uint64_t i = start; i < end; ++i) {
+                if (!bit_get(edge_alive, i)) continue;
+                const node_t x = endpoint(p_, i, side);
+                const uint64_t b = static_cast<uint64_t>(x) & bucket_mask;
+                buckets_local[static_cast<size_t>(b)].push_back(i);
+            }
+        });
+    }
+    for (auto& th : ths) th.join();
+
+    // Merge thread-local buckets into global buckets
     std::vector<std::vector<uint64_t>> buckets;
-    buckets.resize(bucket_count);
-    // Heuristic reserve to reduce reallocations on small N
-    const uint64_t approx_per_bucket = (N / (bucket_count ? bucket_count : 1ULL)) + 1ULL;
-    for (auto& b : buckets) b.reserve(static_cast<size_t>(approx_per_bucket));
-
-    // Partition alive edges into buckets by low bits of the chosen side's endpoint
-    for (uint64_t i = 0; i < N; ++i) {
-        if (!bit_get(edge_alive, i)) continue;
-        const node_t x = endpoint(p_, i, side);
-        const uint64_t b = static_cast<uint64_t>(x) & bucket_mask;
-        buckets[static_cast<size_t>(b)].push_back(i);
-    }
-
-    uint64_t kept = 0;
-    // For each bucket, count degrees per node and keep edges whose node degree >= 2 on this side.
+    buckets.resize(static_cast<size_t>(bucket_count));
     for (size_t b = 0; b < buckets.size(); ++b) {
-        auto& vec = buckets[b];
-        if (vec.empty()) continue;
-        std::unordered_map<node_t, uint32_t> deg;
-        deg.reserve(vec.size() * 2 + 1);
-        for (uint64_t idx : vec) {
-            const node_t x = endpoint(p_, idx, side);
-            auto it = deg.find(x);
-            if (it == deg.end()) deg.emplace(x, 1U); else ++(it->second);
+        size_t total = 0;
+        for (uint32_t t = 0; t < T; ++t) total += thread_buckets[t][b].size();
+        if (total == 0) continue;
+        buckets[b].reserve(total);
+        for (uint32_t t = 0; t < T; ++t) {
+            auto& src = thread_buckets[t][b];
+            if (!src.empty()) {
+                buckets[b].insert(buckets[b].end(), src.begin(), src.end());
+                std::vector<uint64_t>().swap(src);
+            }
         }
-        for (uint64_t idx : vec) {
-            const node_t x = endpoint(p_, idx, side);
-            if (deg[x] >= 2U) { bit_set(new_edge_alive, idx); ++kept; }
-        }
-        // Free memory held by this bucket and its degree map before next bucket
-        std::vector<uint64_t>().swap(vec);
-        deg.clear();
     }
 
-    return kept;
+    // Process buckets in parallel; set kept edges in new_edge_alive atomically
+    std::atomic<uint64_t> kept_atomic{0};
+    ths.clear(); ths.reserve(T);
+    const size_t B = buckets.size();
+    const size_t bchunk = (B + T - 1) / T;
+    for (uint32_t t = 0; t < T; ++t) {
+        size_t bstart = static_cast<size_t>(t) * bchunk;
+        size_t bend = std::min(B, bstart + bchunk);
+        if (bstart >= bend) break;
+        ths.emplace_back([&, bstart, bend]() {
+            uint64_t kept_local = 0;
+            for (size_t b = bstart; b < bend; ++b) {
+                auto& vec = buckets[b];
+                if (vec.empty()) continue;
+                std::unordered_map<node_t, uint32_t> deg;
+                deg.reserve(vec.size() * 2 + 1);
+                for (uint64_t idx : vec) {
+                    const node_t x = endpoint(p_, idx, side);
+                    auto it = deg.find(x);
+                    if (it == deg.end()) deg.emplace(x, 1U); else ++(it->second);
+                }
+                for (uint64_t idx : vec) {
+                    const node_t x = endpoint(p_, idx, side);
+                    if (deg[x] >= 2U) {
+                        size_t we = static_cast<size_t>(idx >> 6);
+                        uint64_t me = 1ULL << (idx & 63ULL);
+                        atomic_fetch_or_u64(&new_edge_alive[we], me);
+                        ++kept_local;
+                    }
+                }
+                std::vector<uint64_t>().swap(vec);
+                deg.clear();
+            }
+            kept_atomic.fetch_add(kept_local, std::memory_order_relaxed);
+        });
+    }
+    for (auto& th : ths) th.join();
+
+    return kept_atomic.load(std::memory_order_relaxed);
 }
 
 // Sparse DSU + adjacency BFS recovery on the trimmed subgraph for cycle length k.
@@ -190,6 +290,7 @@ MeanResult MeanSolver::solve(uint32_t max_rounds, uint32_t cycle_length) {
         res.success = true;
         res.solution_edges = std::move(solution);
         res.note = "Solution found (bucketed DSU/BFS recovery).";
+        
     } else {
         res.success = false;
         res.note = "No cycle found in recovery.";

@@ -30,9 +30,16 @@ struct BenchStats {
     double gps = 0.0; // graphs per second per success measure
     double mem_bpe = 0.0; // lean solver theoretical mem per edge
     std::vector<double> times_success_s;
+    // New: aggregate times for all attempts
+    std::vector<double> times_all_s;
+    double median_time_all_s = 0.0;
 };
 
 BenchStats run_bench(const BenchConfig& cfg);
+
+// Baseline comparison harness: runs lean solver with sip24 (baseline) and sip12 on same parameters
+// Prints the ratio = median_time_all_s(sip12) / median_time_all_s(sip24). Returns true if ratio <= 0.5.
+bool run_baseline_compare(const BenchConfig& base_cfg, bool exit_if_ratio_exceeds = false);
 
 } // namespace cuckoo_sip
 
