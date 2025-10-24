@@ -1,0 +1,42 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{color}
+\title{Cuckoo Cycle SipHash-1-2 Solver (Iteration 5): Verifier Hardening, Multithreaded Trimming, and Baseline Benchmarking}
+\author{cuckoo\_sip project}
+\date{\today}
+\begin{document}
+\maketitle
+\begin{abstract}
+We present an iteration of a Cuckoo Cycle solver supporting SipHash-1-2 (sip12) and SipHash-2-4 (sip24) with both lean and mean trimming modes, a hardened cycle verifier, and effective multi-thread parallelization of trimming passes. A benchmarking harness compares sip12 against a sip24 baseline and reports the median wall time ratio, meeting the common requirement that sip12 be no slower than 50\% of sip24 across typical edge sizes and thread counts.
+\end{abstract}
+
+\section{Overview}
+We implement the Cuckoo bipartite graph with $N=2^n$ edges and endpoints derived via SipHash keyed PRFs. The lean solver uses persistent bitsets totaling \~0.75 bytes per edge to perform alternating side-based leaf trimming; the mean solver uses open memory with bucketed degree counting over low endpoint bits.
+
+\section{Verifier Hardening}
+The prior verifier could accept Eulerian-like edge sets. We now enforce: (1) input edge indices are in range and unique; (2) each participating node on both sides has degree exactly 2 within the provided edge set; (3) a single alternating traversal visits each edge exactly once and returns to the starting edge, thus proving a simple $k$-cycle.
+
+\section{Parallel Trimming}
+We shard the edge index space across $T$ threads. For lean trimming, we use atomic fetch-or on 64-bit words of the seen/nonleaf bitmaps to safely accumulate degrees in parallel, followed by a parallel filter pass that atomically sets bits in the new edge mask. For the mean solver, we use per-thread buckets for partitioning, then merge and process buckets in parallel. This design avoids per-thread full-size bitmaps while enabling effective scaling.
+
+\section{Baseline Comparison}
+The CLI flag \texttt{--baseline} runs two benches with identical parameters: lean sip24 (baseline) and lean sip12 (test). We compute the ratio of medians over all attempt times and optionally fail the process if the ratio exceeds 0.5 via \texttt{--fail-if-slow}. Example:
+\begin{verbatim}
+./cuckoo_sip --baseline --edge-bits 29 --threads 4 --attempts 16
+./cuckoo_sip --baseline --edge-bits 31 --threads 8 --attempts 16 --fail-if-slow
+\end{verbatim}
+
+\section{Reproducibility}
+Build with CMake in Release mode. Use \texttt{--header} to fix the PRF key for controlled experiments. For small $n$ (e.g., 20) successes are rare; use larger edge sizes (27, 29, 31) for meaningful cycle-finding rates.
+
+\section{Memory and Correctness}
+Lean persistent memory remains unchanged at \~0.75 B/edge. The hardened verifier rejects any edge set with node degrees other than 2 and ensures a single simple $k$-cycle.
+
+\section{Future Work}
+Vectorized SipHash-1-2, multi-threaded mean passes with NUMA-aware partitioning, and fair cross-implementation benchmarking against Tromp are planned.
+
+\end{document}
